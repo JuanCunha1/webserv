@@ -1,46 +1,34 @@
 #include "network/Client.hpp"
 
 Client::Client(int fd, int serverPort, size_t maxBodySize)
-	: _fd(fd), _serverPort(serverPort), _lastActivity(std::time(NULL))
-	, _responseBuffer(""), _state(READING)
+	: _fd(fd), _serverPort(serverPort)
+	, _maxBodySize(maxBodySize)
+	, _responseBuffer("")
+	, _lastActivity(std::time(NULL))
 	, _shouldClose(false)
+	, _readClosed(false)
 {
-	(void)maxBodySize; // Evitar advertencia de variable no utilizada
 }
 
 Client::Client()
-	: _fd(-1), _serverPort(-1), _lastActivity(std::time(NULL))
-	, _responseBuffer(""), _state(READING)
-	, _shouldClose(false)
+	: _fd(-1),
+	  _serverPort(-1),
+	  _maxBodySize(0),
+	  _requestBuffer(""),
+	  _responseBuffer(""),
+	  _lastActivity(std::time(NULL)),
+	  _shouldClose(false),
+	  _readClosed(false)
 {
-}
-
-Client::Client(const Client &other)
-	: _fd(other._fd)
-	, _lastActivity(other._lastActivity)
-	, _responseBuffer(other._responseBuffer)
-	
-{
-}
-
-Client &Client::operator=(const Client &other)
-{
-	if (this != &other)
-	{
-		_fd = other._fd;
-		_lastActivity = other._lastActivity;
-		_responseBuffer = other._responseBuffer;
-		
-	}
-	return *this;
 }
 
 Client::~Client()
 {
 	if (_fd != -1)
+	{
 		close(_fd);
-
-	//! Creo que debo hacerlo
+		_fd = -1;
+	}
 }
 
 int Client::getServerPort() const
@@ -53,7 +41,17 @@ int Client::getFd() const
 	return _fd;
 }
 
-int Client::receive()
+bool Client::isReadClosed() const
+{
+	return _readClosed;
+}
+
+void Client::setReadClosed(bool value)
+{
+	_readClosed = value;
+}
+
+Client::IOResult Client::receive()
 {
 	char buffer[4096];
 
@@ -66,18 +64,16 @@ int Client::receive()
 
 	if (bytesRead > 0)
 	{
-	//	_parser.append(std::string(buffer, bytesRead));
+		_requestBuffer.append(buffer, bytesRead);
 		_lastActivity = std::time(NULL);
-		return static_cast<int>(bytesRead);
+
+		return IO_SUCCESS;
 	}
 
 	if (bytesRead == 0)
-		return 0;
+		return IO_CLOSED;
 
-	if (errno == EAGAIN || errno == EWOULDBLOCK)
-		return -1;
-
-	return -2;
+	return IO_ERROR;
 }
 
 void Client::setResponse(const std::string &response)
@@ -90,34 +86,27 @@ bool Client::hasDataToSend() const
 	return !_responseBuffer.empty();
 }
 
-int Client::sendData()
+Client::IOResult Client::sendData()
 {
 	if (_responseBuffer.empty())
-		return 0;
+		return IO_SUCCESS;
 
 	ssize_t bytesSent = send(
 		_fd,
 		_responseBuffer.c_str(),
 		_responseBuffer.size(),
-		0
+		MSG_NOSIGNAL
 	);
 
 	if (bytesSent > 0)
 	{
 		_responseBuffer.erase(0, bytesSent);
 		_lastActivity = std::time(NULL);
-		return static_cast<int>(bytesSent);
+
+		return IO_SUCCESS;
 	}
 
-	if (bytesSent == -1)
-	{
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			return 0;
-
-		return -1;
-	}
-
-	return -1;
+	return IO_ERROR;
 }
 
 bool Client::isTimedOut(std::time_t now, int timeout) const
@@ -133,4 +122,9 @@ void Client::setShouldClose(bool value)
 bool Client::shouldClose() const
 {
 	return _shouldClose;
+}
+
+const std::string &Client::getRequest() const
+{
+    return _requestBuffer;
 }

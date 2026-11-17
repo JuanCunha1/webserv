@@ -4,7 +4,6 @@
 Socket::Socket(int port, const std::string &host)
 	: _fd(-1), _port(port), _host(host)
 {
-	std::cout << "host: " << _host << std::endl;
 }
 
 Socket::Socket()
@@ -12,26 +11,13 @@ Socket::Socket()
 {
 }
 
-Socket::Socket(const Socket &other)
-	: _fd(other._fd), _port(other._port), _host(other._host)
-{
-}
-
-Socket &Socket::operator=(const Socket &other)
-{
-	if (this != &other)
-	{
-		_fd = other._fd;
-		_port = other._port;
-		_host = other._host;
-	}
-	return *this;
-}
-
 Socket::~Socket()
 {
 	if (_fd != -1)
+	{
 		close(_fd);
+		_fd = -1;
+	}
 }
 
 void Socket::create()
@@ -48,7 +34,7 @@ void Socket::create()
 
 const std::string &Socket::getHost() const
 {
-    return _host;
+	return _host;
 }
 
 void Socket::bindSocket()
@@ -59,11 +45,15 @@ void Socket::bindSocket()
 
 	address.sin_family = AF_INET;
 	if (_host == "localhost")
-    	address.sin_addr.s_addr = inet_addr("127.0.0.1");
+		address.sin_addr.s_addr = inet_addr("127.0.0.1");
 	else if (_host == "0.0.0.0")
 		address.sin_addr.s_addr = htonl(INADDR_ANY);
 	else
+	{
 		address.sin_addr.s_addr = inet_addr(_host.c_str());
+		if (address.sin_addr.s_addr == INADDR_NONE)
+			throw std::runtime_error("Invalid IPv4 address");
+	}
 	address.sin_port = htons(_port);
 
 	if (bind(_fd,
@@ -85,7 +75,6 @@ void Socket::listenSocket()
 		throw std::runtime_error("listen() failed");
 	}
 }
-
 int Socket::acceptConnection()
 {
 	struct sockaddr_in clientAddress;
@@ -93,11 +82,14 @@ int Socket::acceptConnection()
 
 	int clientFd = accept(
 		_fd,
-		(struct sockaddr *)&clientAddress,
-		&clientAddressLength);
+		reinterpret_cast<struct sockaddr *>(&clientAddress),
+		&clientAddressLength
+	);
+
 	if (clientFd == -1)
 	{
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
+		if (errno == EAGAIN || errno == EWOULDBLOCK ||
+			errno == EINTR)
 			return -1;
 
 		throw std::runtime_error("accept() failed");
@@ -118,12 +110,7 @@ int Socket::getPort() const
 
 void Socket::setNonBlocking()
 {
-	int flags = fcntl(_fd, F_GETFL, 0);
-
-	if (flags == -1)
-		throw std::runtime_error("fcntl(F_GETFL) failed");
-
-	if (fcntl(_fd, F_SETFL, flags | O_NONBLOCK) == -1)
+	if (fcntl(_fd, F_SETFL, O_NONBLOCK) == -1)
 		throw std::runtime_error("fcntl(F_SETFL) failed");
 }
 

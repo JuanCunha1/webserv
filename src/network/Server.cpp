@@ -1,66 +1,56 @@
 #include "network/Server.hpp"
 #include <csignal>
+#include "network/Server.hpp"
+
+#include <csignal>
+#include <cerrno>
+#include <ctime>
+#include <iostream>
+#include <stdexcept>
+#include <unistd.h>
+#include <fcntl.h>
 
 static volatile sig_atomic_t g_running = 1;
 
 static void handleSignal(int signal)
 {
-    (void)signal;
-    g_running = 0;
+	(void)signal;
+	g_running = 0;
 }
 
 void Server::setupSignals()
 {
-    std::signal(SIGINT, handleSignal);
-    std::signal(SIGTERM, handleSignal);
+	std::signal(SIGINT, handleSignal);
+	std::signal(SIGTERM, handleSignal);
 }
 
 Server::Server()
-	:	_sockets(),
-		_clients(),
-		_pollFds(),
-		_serverConfigs()
+	: _sockets(),
+	  _clients(),
+	  _pollFds(),
+	  _serverConfigs()
 {
 }
 
 Server::Server(std::vector<ServerConfig> serverConfigs)
-	:	_sockets(),
-		_clients(),
-		_pollFds(),
-		_serverConfigs(serverConfigs)
+	: _sockets(),
+	  _clients(),
+	  _pollFds(),
+	  _serverConfigs(serverConfigs)
 {
-}
-
-Server::Server(const Server &other)
-	: _sockets(other._sockets)
-	, _clients(other._clients)
-	, _pollFds(other._pollFds)
-	, _serverConfigs(other._serverConfigs)
-{ }
-Server &Server::operator=(const Server &other)
-{
-	if (this != &other)
-	{
-		_sockets = other._sockets;
-		_clients = other._clients;
-		_pollFds = other._pollFds;
-		_serverConfigs = other._serverConfigs;
-	}
-	return *this;
 }
 
 Server::~Server()
 {
 	for (std::vector<Client *>::iterator it = _clients.begin();
 		 it != _clients.end(); ++it)
-	{
 		delete *it;
-	}
+
 	for (std::vector<Socket *>::iterator it = _sockets.begin();
 		 it != _sockets.end(); ++it)
-	{
 		delete *it;
-	}
+
+	_clients.clear();
 	_sockets.clear();
 	_pollFds.clear();
 }
@@ -70,8 +60,13 @@ void Server::start()
 	for (size_t i = 0; i < _serverConfigs.size(); ++i)
 	{
 		const ServerConfig &config = _serverConfigs[i];
+
+		std::cout << "Starting server on " << config.host
+				  << ":" << config.port << std::endl;
+
 		if (hasListeningSocket(config.host, config.port))
 			continue;
+
 		Socket *socket = new Socket(config.port, config.host);
 		try
 		{
@@ -80,7 +75,6 @@ void Server::start()
 			socket->setNonBlocking();
 			socket->bindSocket();
 			socket->listenSocket();
-
 			addListeningSocket(socket);
 		}
 		catch (...)
@@ -89,10 +83,9 @@ void Server::start()
 			throw;
 		}
 	}
-	std::cout << "Server started with "
-			  << _sockets.size()
-			  << " listening socket(s)"
-			  << std::endl;
+
+	std::cout << "Server started with " << _sockets.size()
+			  << " listening socket(s)" << std::endl;
 }
 
 void Server::addListeningSocket(Socket *socket)
@@ -122,7 +115,6 @@ Socket *Server::findListeningSocket(int fd)
 		if (_sockets[i]->getFd() == fd)
 			return _sockets[i];
 	}
-
 	return NULL;
 }
 
@@ -131,44 +123,48 @@ void Server::run()
 	while (g_running)
 	{
 		struct pollfd *fds = NULL;
-
 		if (!_pollFds.empty())
 			fds = &_pollFds[0];
+
 		int result = poll(
 			fds,
 			static_cast<nfds_t>(_pollFds.size()),
 			1000
 		);
+
 		if (result == -1)
 		{
 			if (errno == EINTR)
-                continue;
+				continue;
 			throw std::runtime_error("poll() failed");
 		}
-		if (result == 0)
-		{
-			checkTimeouts();
-			continue;
-		}
-		size_t i = 0;
 
-		while (g_running &&i < _pollFds.size())
+		if (result > 0)
 		{
-			if (_pollFds[i].revents == 0)
+			/*
+			** Process the current poll set. If an entry is removed, the next
+			** entry shifts into its index, so do not increment in that case.
+			** Newly accepted clients have revents == 0 and are not processed
+			** until the next poll() call.
+			*/
+			size_t i = 0;
+			while (g_running && i < _pollFds.size())
 			{
-				++i;
-				continue;
+				if (_pollFds[i].revents == 0)
+				{
+					++i;
+					continue;
+				}
+
+				bool removed = handlePollEvent(i);
+				if (!removed)
+					++i;
 			}
-			size_t oldSize = _pollFds.size();
-
-			handlePollEvent(i);
-
-		
-			if (_pollFds.size() < oldSize)
-				++i;
 		}
+
 		checkTimeouts();
 	}
+
 	std::cout << "\nShutting down server..." << std::endl;
 }
 
@@ -179,23 +175,24 @@ bool Server::isListeningSocket(int fd) const
 		if (_sockets[i]->getFd() == fd)
 			return true;
 	}
-
 	return false;
 }
 
 void Server::handleServerError(size_t index)
 {
+	if (index >= _pollFds.size())
+		return;
+
 	int fd = _pollFds[index].fd;
+	std::cerr << "Error on listening socket fd " << fd << std::endl;
 
-	std::cerr << "Error on listening socket fd "
-			  << fd << std::endl;
-
-	for (size_t i = 0; i < _sockets.size(); ++i)
+	for (std::vector<Socket *>::iterator it = _sockets.begin();
+		 it != _sockets.end(); ++it)
 	{
-		if (_sockets[i]->getFd() == fd)
+		if ((*it)->getFd() == fd)
 		{
-			delete _sockets[i];
-			_sockets.erase(_sockets.begin() + i);
+			delete *it;
+			_sockets.erase(it);
 			break;
 		}
 	}
@@ -203,10 +200,10 @@ void Server::handleServerError(size_t index)
 	_pollFds.erase(_pollFds.begin() + index);
 }
 
-void Server::handlePollEvent(size_t index)
+bool Server::handlePollEvent(size_t index)
 {
 	if (index >= _pollFds.size())
-		return;
+		return false;
 
 	int fd = _pollFds[index].fd;
 	short revents = _pollFds[index].revents;
@@ -216,46 +213,35 @@ void Server::handlePollEvent(size_t index)
 		if (revents & (POLLERR | POLLHUP | POLLNVAL))
 		{
 			handleServerError(index);
-			return;
+			return true;
 		}
 
 		if (revents & POLLIN)
 			handleServerEvent(index);
 
-		return;
+		return false;
 	}
 
-	if (revents & (POLLERR | POLLHUP | POLLNVAL))
-	{
-		removeClient(index);
-		return;
-	}
-
-	if (revents & POLLIN)
-	{
-		handleClientRead(index);
-		if (findClient(fd) == NULL)
-			return;
-	}
-
-	if (revents & POLLOUT)
-	{
-		for (size_t i = 0; i < _pollFds.size(); ++i)
-		{
-			if (_pollFds[i].fd == fd)
-			{
-				handleClientWrite(i);
-				return;
-			}
-		}
-	}
+	handleClientEvent(index);
+	return findPollFd(fd) == -1;
 }
 
+int Server::findPollFd(int fd) const
+{
+	for (size_t i = 0; i < _pollFds.size(); ++i)
+	{
+		if (_pollFds[i].fd == fd)
+			return static_cast<int>(i);
+	}
+	return -1;
+}
 
 void Server::handleServerEvent(size_t index)
 {
-	int fd = _pollFds[index].fd;
+	if (index >= _pollFds.size())
+		return;
 
+	int fd = _pollFds[index].fd;
 	for (size_t i = 0; i < _sockets.size(); ++i)
 	{
 		if (_sockets[i]->getFd() == fd)
@@ -271,98 +257,128 @@ void Server::handleClientEvent(size_t index)
 	if (index >= _pollFds.size())
 		return;
 
+	int fd = _pollFds[index].fd;
 	short revents = _pollFds[index].revents;
 
-	if (revents & (POLLERR | POLLHUP | POLLNVAL))
+	if (revents & POLLNVAL)
 	{
-		std::cout << "Client disconnected: "
-				  << _pollFds[index].fd
-				  << std::endl;
 		removeClient(index);
 		return;
 	}
-	if (revents & POLLIN)
+
+	/*
+	** POLLHUP can arrive together with POLLIN while unread request bytes
+	** are still available. Read first; do not discard those bytes merely
+	** because the peer has closed its sending side.
+	*/
+	if (revents & (POLLIN | POLLHUP))
 	{
-		handleClientRead(index);
-		if (index >= _pollFds.size())
-			return;
+		int currentIndex = findPollFd(fd);
+		if (currentIndex != -1)
+			handleClientRead(static_cast<size_t>(currentIndex));
 	}
+
+	int currentIndex = findPollFd(fd);
+	if (currentIndex == -1)
+		return;
+
 	if (revents & POLLOUT)
-		handleClientWrite(index);
+		handleClientWrite(static_cast<size_t>(currentIndex));
+
+	currentIndex = findPollFd(fd);
+	if (currentIndex == -1)
+		return;
+
+	/* POLLERR is treated as a fatal socket condition. */
+	if (revents & POLLERR)
+	{
+		std::cerr << "Client socket error: " << fd << std::endl;
+		removeClient(static_cast<size_t>(currentIndex));
+	}
 }
 
 void Server::handleClientRead(size_t index)
 {
-	Client *client = findClient(_pollFds[index].fd);
+	if (index >= _pollFds.size())
+		return;
 
+	int fd = _pollFds[index].fd;
+	Client *client = findClient(fd);
 	if (client == NULL)
 	{
 		removeClient(index);
 		return;
 	}
 
-	int result = client->receive();
-
-	if (result == 0 || result == -2)
+	Client::IOResult result = client->receive();
+	if (result == Client::IO_ERROR)
 	{
 		removeClient(index);
 		return;
 	}
 
-	if (result == -1)
-		return;
+	/*
+	** TODO: Parse client->getRequest() here.
+	** - Detect the end of the HTTP headers and request body.
+	** - Enforce client body-size limits using _maxBodySize.
+	** - Select the matching server and location configuration.
+	** - Build the HTTP response and call client->setResponse(...).
+	** - Set shouldClose when the request requires Connection: close.
+	*/
 
-	//std::string response = "";
+	if (client->hasDataToSend())
+		_pollFds[index].events |= POLLOUT;
 
-	//response += handlerResult.staticResponse.getHeadersAsString();
-	//response += handlerResult.staticResponse.getBody();
+	if (result == Client::IO_CLOSED)
+	{
+		client->setReadClosed(true);
+		_pollFds[index].events &= ~POLLIN;
 
-	//client->setResponse(response);
-
-	//_pollFds[index].events |= POLLOUT;
+		/*
+		** The parser above must get a chance to process any bytes already
+		** received before this close decision is made.
+		*/
+		if (!client->hasDataToSend())
+		{
+			removeClient(index);
+			return;
+		}
+	}
 }
 
 void Server::handleClientWrite(size_t index)
 {
-	Client *client = findClient(_pollFds[index].fd);
+	if (index >= _pollFds.size())
+		return;
+
+	int fd = _pollFds[index].fd;
+	Client *client = findClient(fd);
 	if (client == NULL)
 	{
 		removeClient(index);
 		return;
 	}
-	/*
-	std::cout << "[DEBUG HTTP] Intentando enviar " << client->getResponseBuffer().size() 
-		  << " bytes al cliente FD " << client->getFd() << std::endl;
-	*/
-	int result = client->sendData();
-	if (result < 0)
+
+	Client::IOResult result = client->sendData();
+	if (result != Client::IO_SUCCESS)
 	{
 		removeClient(index);
 		return;
 	}
+
 	if (client->hasDataToSend())
 	{
 		_pollFds[index].events |= POLLOUT;
 		return;
 	}
 
-	// Toda a resposta foi enviada.
 	_pollFds[index].events &= ~POLLOUT;
 
-	if (client->shouldClose())
+	if (client->shouldClose() || client->isReadClosed())
 	{
 		removeClient(index);
 		return;
 	}
-
-	/*
-	// Solo volvemos a escuchar si ya vaciamos todo el buffer de salida
-	if (client->hasDataToSend()) {
-		_pollFds[index].events |= POLLOUT; 
-	} else {
-		_pollFds[index].events = POLLIN; 
-	}
-	*/
 }
 
 Client *Server::findClient(int fd)
@@ -372,7 +388,6 @@ Client *Server::findClient(int fd)
 		if (_clients[i]->getFd() == fd)
 			return _clients[i];
 	}
-
 	return NULL;
 }
 
@@ -380,15 +395,17 @@ void Server::removeClient(size_t index)
 {
 	if (index >= _pollFds.size())
 		return;
+
 	int fd = _pollFds[index].fd;
 	if (isListeningSocket(fd))
 		return;
+
 	for (std::vector<Client *>::iterator it = _clients.begin();
 		 it != _clients.end(); ++it)
 	{
 		if ((*it)->getFd() == fd)
 		{
-			delete *it;
+			delete *it; // Client destructor closes the client FD.
 			_clients.erase(it);
 			break;
 		}
@@ -401,62 +418,93 @@ void Server::addClient(size_t socketIndex)
 {
 	if (socketIndex >= _sockets.size())
 		return;
-	int clientFd =
-		_sockets[socketIndex]->acceptConnection();
+
+	Socket *listeningSocket = _sockets[socketIndex];
+	int clientFd = listeningSocket->acceptConnection();
 	if (clientFd == -1)
 		return;
-	int flags = fcntl(clientFd, F_GETFL, 0);
-	if (flags == -1 ||
-		fcntl(clientFd, F_SETFL, flags | O_NONBLOCK) == -1)
+
+	if (fcntl(clientFd, F_SETFL, O_NONBLOCK) == -1)
 	{
 		close(clientFd);
 		throw std::runtime_error(
-			"Failed to set client socket non-blocking");
+			"Failed to set client socket non-blocking"
+		);
 	}
+
+	/*
+	** Do not use socketIndex to index _serverConfigs: duplicate listeners
+	** are skipped in start(), so the two vector indices are not guaranteed
+	** to correspond. Find a configuration matching this listener instead.
+	*/
+	size_t configIndex = 0;
+	while (configIndex < _serverConfigs.size())
+	{
+		if (_serverConfigs[configIndex].host == listeningSocket->getHost()
+			&& _serverConfigs[configIndex].port == listeningSocket->getPort())
+			break;
+		++configIndex;
+	}
+
+	if (configIndex == _serverConfigs.size())
+	{
+		close(clientFd);
+		throw std::runtime_error(
+			"No server configuration found for listening socket"
+		);
+	}
+
 	Client *client = NULL;
 	try
 	{
 		client = new Client(
 			clientFd,
-			_sockets[socketIndex]->getPort(),
-			_serverConfigs[socketIndex].maxBodySize
+			listeningSocket->getPort(),
+			_serverConfigs[configIndex].maxBodySize
 		);
-		_clients.push_back(client);
-		struct pollfd clientPollFd;
-		clientPollFd.fd = clientFd;
-		clientPollFd.events = POLLIN;
-		clientPollFd.revents = 0;
-
-		try
-		{
-			_pollFds.push_back(clientPollFd);
-		}
-		catch (...)
-		{
-			_clients.pop_back();
-			delete client;
-			throw;
-		}
 	}
 	catch (...)
 	{
-		if (client == NULL)
-			close(clientFd);
+		close(clientFd);
+		throw;
+	}
 
+	try
+	{
+		_clients.push_back(client);
+	}
+	catch (...)
+	{
+		delete client;
+		throw;
+	}
+
+	struct pollfd clientPollFd;
+	clientPollFd.fd = clientFd;
+	clientPollFd.events = POLLIN;
+	clientPollFd.revents = 0;
+
+	try
+	{
+		_pollFds.push_back(clientPollFd);
+	}
+	catch (...)
+	{
+		_clients.pop_back();
+		delete client;
 		throw;
 	}
 }
 
 bool Server::hasListeningSocket(const std::string &host, int port) const
 {
-    for (size_t i = 0; i < _sockets.size(); ++i)
-    {
-        if (_sockets[i]->getHost() == host
-            && _sockets[i]->getPort() == port)
-            return true;
-    }
-
-    return false;
+	for (size_t i = 0; i < _sockets.size(); ++i)
+	{
+		if (_sockets[i]->getHost() == host
+			&& _sockets[i]->getPort() == port)
+			return true;
+	}
+	return false;
 }
 
 void Server::checkTimeouts()
@@ -466,98 +514,34 @@ void Server::checkTimeouts()
 	for (size_t i = 0; i < _clients.size(); ++i)
 	{
 		Client *client = _clients[i];
+		if (client->shouldClose())
+			continue;
 
 		if (!client->isTimedOut(now, CLIENT_TIMEOUT))
 			continue;
 
 		int fd = client->getFd();
-
-		for (size_t j = 0; j < _pollFds.size(); ++j)
-		{
-			if (_pollFds[j].fd != fd)
-				continue;
-
-			std::cerr << "Client timeout: "
-					  << fd
-					  << std::endl;
-			std::string response = "HTTP/1.1 408 Request Timeout\r\n"
-								   "Content-Length: 0\r\n"
-								   "Connection: close\r\n"
-								   "\r\n";
-			/*Response errorRes =
-				ResponseBuilder::buildErrorResponse(
-					408,
-					"Request Timeout"
-				);
-
-			std::string response =
-				errorRes.getHeadersAsString()
-				+ errorRes.getBody();
-*/
-			client->setResponse(response);
-			client->setShouldClose(true);
-
-			_pollFds[j].events |= POLLOUT;
-
-			break;
-		}
-	}
-}
-//! No hacen falta pq ya usamos las de Ainhoa
-/*
-ConfigServer *Server::findServerConfig(int port)
-{
-	for (size_t i = 0; i < _serverConfigs.size(); ++i)
-	{
-		if (_serverConfigs[i].port == port)
-			return &_serverConfigs[i];
-	}
-
-	return NULL;
-}
-
-ConfigLocation *Server::findLocation(ConfigServer &server,
-									 const std::string &uri)
-{
-	ConfigLocation *bestMatch = NULL;
-	size_t bestLength = 0;
-
-	for (size_t i = 0; i < server.locations.size(); ++i)
-	{
-		const ConfigLocation &location = server.locations[i];
-
-		if (location.path.empty())
+		int pollIndex = findPollFd(fd);
+		if (pollIndex == -1)
 			continue;
 
-		bool match = false;
-
-		if (location.path == "/")
+		if (client->hasDataToSend())
 		{
-			match = true;
-		}
-		else if (uri == location.path)
-		{
-			match = true;
-		}
-		else if (uri.compare(0, location.path.length(),
-								location.path) == 0)
-		{
-			if (location.path[location.path.length() - 1] == '/' ||
-				(uri.length() > location.path.length() && uri[location.path.length()] == '/')
-			)
-			{
-				match = true;
-			}
+			/* Preserve a response already being sent; close after it drains. */
+			client->setShouldClose(true);
+			_pollFds[pollIndex].events |= POLLOUT;
+			continue;
 		}
 
-		if (match && location.path.length() > bestLength)
-		{
-			bestMatch = &server.locations[i];
-			bestLength = location.path.length();
-		}
+		/* TODO: Generate the configured 408 error page when error pages exist. */
+		std::string response =
+			"HTTP/1.1 408 Request Timeout\r\n"
+			"Content-Length: 0\r\n"
+			"Connection: close\r\n"
+			"\r\n";
+
+		client->setResponse(response);
+		client->setShouldClose(true);
+		_pollFds[pollIndex].events |= POLLOUT;
 	}
-
-	return bestMatch;
 }
-*/
-

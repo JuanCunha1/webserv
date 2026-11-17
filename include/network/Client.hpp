@@ -7,27 +7,29 @@
 #include <cerrno>
 #include <ctime>
 #include <iostream>
-
 class Client
 {
 	public:
-		enum State {
-			READING,
-			WAITING_FOR_CGI,
-			READY_TO_SEND,
-			CLOSING
+		enum IOResult
+		{
+			IO_SUCCESS,
+			IO_CLOSED,
+			IO_ERROR
 		};
 
 	private:
-		int				_fd;
-		int				_serverPort;
-		std::time_t		_lastActivity;
-		std::string		_responseBuffer;
+		int         _fd;
+		int         _serverPort;
+		size_t      _maxBodySize;
 
-		State			_state;
-		bool			_shouldClose;
-		
-		
+		std::string _requestBuffer;
+		std::string _responseBuffer;
+
+		std::time_t _lastActivity;
+
+		bool        _shouldClose;
+		bool        _readClosed;
+
 		Client();
 		Client(const Client &other);
 		Client &operator=(const Client &other);
@@ -36,26 +38,24 @@ class Client
 		Client(int fd, int serverPort, size_t maxBodySize);
 		~Client();
 
-		void setState(State state) { _state = state; }
-		State getState() const { return _state; }
-
 		int getFd() const;
 		int getServerPort() const;
 
-		int receive();
-		int sendData();
+		IOResult receive();
+		IOResult sendData();
 
 		void setResponse(const std::string &response);
 
 		bool hasDataToSend() const;
 
 		const std::string &getRequest() const;
-
-		const std::string &getResponseBuffer() const { return _responseBuffer; }
+		const std::string &getResponseBuffer() const;
 
 		bool isTimedOut(std::time_t now, int timeout) const;
 
 		void setShouldClose(bool value);
 		bool shouldClose() const;
-};
 
+		bool isReadClosed() const;
+		void setReadClosed(bool value);
+};

@@ -61,10 +61,10 @@ Client::IOResult Client::receive()
 		sizeof(buffer),
 		0
 	);
-
 	if (bytesRead > 0)
 	{
-		_requestBuffer.append(buffer, bytesRead);
+		_requestBuffer = buffer;
+		//_requestBuffer.append(buffer, bytesRead);
 		_lastActivity = std::time(NULL);
 
 		return IO_SUCCESS;

@@ -155,9 +155,7 @@ void Server::run()
 					++i;
 					continue;
 				}
-
-				bool removed = handlePollEvent(i);
-				if (!removed)
+				if (!handlePollEvent(i))
 					++i;
 			}
 		}
@@ -266,11 +264,6 @@ void Server::handleClientEvent(size_t index)
 		return;
 	}
 
-	/*
-	** POLLHUP can arrive together with POLLIN while unread request bytes
-	** are still available. Read first; do not discard those bytes merely
-	** because the peer has closed its sending side.
-	*/
 	if (revents & (POLLIN | POLLHUP))
 	{
 		int currentIndex = findPollFd(fd);
@@ -289,7 +282,6 @@ void Server::handleClientEvent(size_t index)
 	if (currentIndex == -1)
 		return;
 
-	/* POLLERR is treated as a fatal socket condition. */
 	if (revents & POLLERR)
 	{
 		std::cerr << "Client socket error: " << fd << std::endl;
@@ -334,10 +326,6 @@ void Server::handleClientRead(size_t index)
 		client->setReadClosed(true);
 		_pollFds[index].events &= ~POLLIN;
 
-		/*
-		** The parser above must get a chance to process any bytes already
-		** received before this close decision is made.
-		*/
 		if (!client->hasDataToSend())
 		{
 			removeClient(index);
@@ -405,7 +393,7 @@ void Server::removeClient(size_t index)
 	{
 		if ((*it)->getFd() == fd)
 		{
-			delete *it; // Client destructor closes the client FD.
+			delete *it;
 			_clients.erase(it);
 			break;
 		}
@@ -432,11 +420,6 @@ void Server::addClient(size_t socketIndex)
 		);
 	}
 
-	/*
-	** Do not use socketIndex to index _serverConfigs: duplicate listeners
-	** are skipped in start(), so the two vector indices are not guaranteed
-	** to correspond. Find a configuration matching this listener instead.
-	*/
 	size_t configIndex = 0;
 	while (configIndex < _serverConfigs.size())
 	{
@@ -527,7 +510,6 @@ void Server::checkTimeouts()
 
 		if (client->hasDataToSend())
 		{
-			/* Preserve a response already being sent; close after it drains. */
 			client->setShouldClose(true);
 			_pollFds[pollIndex].events |= POLLOUT;
 			continue;

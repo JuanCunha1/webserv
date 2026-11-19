@@ -28,15 +28,14 @@ COMMON_SRCS = src/protocol/RequestParser.cpp \
 			  src/protocol/handlers/CgiHandler.cpp \
               src/protocol/MimeTypes.cpp \
 			  src/Utils.cpp
-CORE_SRCS = \
-	$(SRC_DIR)/core/Router.cpp \
-	$(SRC_DIR)/core/FileManager.cpp \
-	$(SRC_DIR)/core/CGI.cpp \
-	$(SRC_DIR)/core/AutoIndex.cpp
+CGI_SRCS = \
+	$(SRC_DIR)/CGI/CgiHandler.cpp \
+	$(SRC_DIR)/CGI/CgiProcess.cpp
 
 CONFIG_SRCS = \
-	$(SRC_DIR)/config/ConfigParser.cpp 
-	
+	$(SRC_DIR)/config/ConfigParser.cpp \
+	$(SRC_DIR)/config/ConfigTokenizer.cpp \
+	$(SRC_DIR)/config/ConfigValidator.cpp
 
 
 SRCS = \
@@ -44,7 +43,7 @@ SRCS = \
 	$(CONFIG_SRCS) \
 	$(NETWORK_SRCS) \
 	#$(COMMON_SRCS) \
-	$(CORE_SRCS) \
+	$(CGI_SRCS) \
 	
 OBJS = $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)
 DEPS = $(OBJS:.o=.d)

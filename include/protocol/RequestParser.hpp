@@ -1,48 +1,54 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
-#include <map>
-#include "HttpRequest.hpp"
+
+#include "Request.hpp"
 
 class RequestParser
 {
-public:
-	enum State
-	{
-		REQUEST_LINE,
-		HEADERS,
-		BODY_CONTENT_LENGTH,
-		CHUNK_SIZE,
-		CHUNK_DATA,
-		CHUNK_TRAILER,
-		COMPLETE,
-		ERROR
-	};
+    public:
+        
+        enum ParseStatus
+        {
+            PARSE_INCOMPLETE,
+			PARSE_COMPLETE,
+			PARSE_ERROR
+        };
+    
+    private:
+        std::string _buffer;
+        size_t      _maxBodySize;
+        bool        _complete;
+        bool        _error;
+        Request     _request;
+        std::string _errorMessage;
 
-private:
-	State		_state;
-	std::string	_buffer;
-	HttpRequest	_request;
-	size_t		_maxBodySize;
-	size_t		_chunkSize;
+        bool parseHeaders();
+        bool parseRequestLine(const std::string &line);
+        bool parseHeaderLine(const std::string &line);
+        bool parseBody();
 
-	bool parseRequestLine(const std::string &line);
-	bool parseHeaderLine(const std::string &line);
-	bool processHeaders();
-	bool processChunkSize(const std::string &line);
-	bool fail();
+        static std::string trim(const std::string &value);
+        static std::string toLower(const std::string &value);
+        static bool isNummber(const std::string &value);
 
-	static std::string trim(const std::string &str);
-	static std::string toLower(const std::string &str);
+    public:
+        
+        RequestParser();
+        RequestParser(size_t maxBodySize);
+        RequestParser(const RequestParser &other);
+        RequestParser &operator=(const RequestParser &other);
+        ~RequestParser();
 
-public:
-	explicit RequestParser(size_t maxBodySize);
-	~RequestParser();
+        void append(const std::string &data);
 
-	bool parse(const std::string &data);
+		ParseStatus getState() const;
+		bool isComplete() const;
+		bool hasError() const;
 
-	State getState() const;
-	const HttpRequest &getRequest() const;
-	bool isComplete() const;
-	void reset();
+		const Request &getRequest() const;
+		const std::string &getErrorMessage() const;
+
+		void reset();
 };

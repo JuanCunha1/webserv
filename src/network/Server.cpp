@@ -608,6 +608,11 @@ void Server::checkTimeouts()
 		Client *client = _clients[i];
 		
 
+		if (findCgiByClient(client->getFd()) != NULL)
+		{
+			++i;
+			continue;
+		}
 		if (!client->isTimedOut(now, CLIENT_TIMEOUT))
 		{
 			++i;

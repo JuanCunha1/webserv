@@ -7,6 +7,24 @@
 #include <cerrno>
 #include <ctime>
 #include <iostream>
+#include "protocol/RequestParser.hpp"
+
+#define DEBUG 1
+
+#include <iostream>
+
+#define LOG(message) \
+    do { \
+        if (DEBUG) \
+            std::cout << message << std::endl; \
+    } while (0)
+
+#define DEBUG_ERROR(message) \
+    do { \
+        if (DEBUG) \
+            std::cerr << message << std::endl; \
+    } while (0)
+	
 class Client
 {
 	public:
@@ -14,7 +32,8 @@ class Client
 		{
 			IO_SUCCESS,
 			IO_CLOSED,
-			IO_ERROR
+			IO_ERROR,
+			IO_WOULD_BLOCK
 		};
 
 	private:
@@ -22,13 +41,15 @@ class Client
 		int         _serverPort;
 		size_t      _maxBodySize;
 
-		std::string _requestBuffer;
 		std::string _responseBuffer;
 
 		std::time_t _lastActivity;
 
 		bool        _shouldClose;
 		bool        _readClosed;
+		bool        _requestHandled;
+
+		RequestParser _parser;
 
 		Client();
 		Client(const Client &other);
@@ -42,20 +63,29 @@ class Client
 		int getServerPort() const;
 
 		IOResult receive();
-		IOResult sendData();
-
 		void setResponse(const std::string &response);
-
 		bool hasDataToSend() const;
 
-		const std::string &getRequest() const;
+		IOResult sendData();
+
 		const std::string &getResponseBuffer() const;
 
 		bool isTimedOut(std::time_t now, int timeout) const;
 
+		bool isReadClosed() const;
+		void setReadClosed(bool value);
+
+		bool hasCompleteRequest() const;
+		bool hasRequestError() const;
+
+		const Request &getRequest() const;
+		const std::string &getRequestError() const;
+
+		void resetRequest();
+		bool beginRequestHandling();
+
 		void setShouldClose(bool value);
 		bool shouldClose() const;
 
-		bool isReadClosed() const;
-		void setReadClosed(bool value);
+		void refreshActivityTimer();
 };

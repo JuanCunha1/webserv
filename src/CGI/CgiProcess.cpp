@@ -1,6 +1,5 @@
 #include "CGI/CgiProcess.hpp"
 
-
 CgiProcess::CgiProcess(size_t maxOutputSize)
 	: _pid(-1),
 	  _stdinFd(-1),
@@ -17,18 +16,35 @@ CgiProcess::CgiProcess(size_t maxOutputSize)
 {
 }
 
-
 CgiProcess::~CgiProcess()
 {
 	closeInput();
 	closeOutput();
+
 	if (_pid > 0 && !_childExited)
 	{
-		kill(_pid, SIGKILL);
-		while (waitpid(_pid, NULL, 0) == -1 && errno == EINTR)
+		pid_t pid = _pid;
+
+		if (kill(pid, SIGKILL) == 0 || errno == ESRCH)
 		{
+			int status = 0;
+			pid_t result;
+
+			do
+			{
+				result = waitpid(pid, &status, 0);
+			}
+			while (result == -1 && errno == EINTR);
+
+			if (result == pid)
+			{
+				_exitStatus = status;
+				_childExited = true;
+			}
+			else if (result == -1 && errno == ECHILD)
+				_childExited = true;
 		}
-		_childExited = true;
+
 		_pid = -1;
 	}
 }
@@ -110,8 +126,10 @@ void CgiProcess::buildEnvironment(
 }
 
 void CgiProcess::executeChild(
-	const int inputPipe[2], const int outputPipe[2],
-	const std::string &interpreter, const std::string &scriptPath,
+	const int inputPipe[2],
+	const int outputPipe[2],
+	const std::string &interpreter,
+	const std::string &scriptPath,
 	char *envp[]) const
 {
 	if (dup2(inputPipe[0], STDIN_FILENO) == -1)
@@ -120,10 +138,21 @@ void CgiProcess::executeChild(
 	if (dup2(outputPipe[1], STDOUT_FILENO) == -1)
 		_exit(126);
 
-	close(inputPipe[0]);
-	close(inputPipe[1]);
-	close(outputPipe[0]);
-	close(outputPipe[1]);
+	if (inputPipe[0] != STDIN_FILENO &&
+		inputPipe[0] != STDOUT_FILENO)
+		close(inputPipe[0]);
+
+	if (inputPipe[1] != STDIN_FILENO &&
+		inputPipe[1] != STDOUT_FILENO)
+		close(inputPipe[1]);
+
+	if (outputPipe[0] != STDIN_FILENO &&
+		outputPipe[0] != STDOUT_FILENO)
+		close(outputPipe[0]);
+
+	if (outputPipe[1] != STDIN_FILENO &&
+		outputPipe[1] != STDOUT_FILENO)
+		close(outputPipe[1]);
 
 	char *argv[3];
 	argv[0] = const_cast<char *>(interpreter.c_str());
@@ -135,7 +164,8 @@ void CgiProcess::executeChild(
 }
 
 void CgiProcess::configureParent(
-	int inputPipe[2], int outputPipe[2],
+	int inputPipe[2],
+	int outputPipe[2],
 	const std::string &requestBody)
 {
 	closeFd(inputPipe[0]);
@@ -143,6 +173,7 @@ void CgiProcess::configureParent(
 
 	_stdinFd = inputPipe[1];
 	inputPipe[1] = -1;
+
 	_stdoutFd = outputPipe[0];
 	outputPipe[0] = -1;
 
@@ -158,9 +189,6 @@ void CgiProcess::configureParent(
 	if (fcntl(_stdinFd, F_SETFL, O_NONBLOCK) == -1)
 	{
 		int savedErrno = errno;
-		terminate();
-		closeInput();
-		closeOutput();
 		throw std::runtime_error(
 			std::string("fcntl CGI stdin failed: ") +
 			std::strerror(savedErrno));
@@ -169,9 +197,6 @@ void CgiProcess::configureParent(
 	if (fcntl(_stdoutFd, F_SETFL, O_NONBLOCK) == -1)
 	{
 		int savedErrno = errno;
-		terminate();
-		closeInput();
-		closeOutput();
 		throw std::runtime_error(
 			std::string("fcntl CGI stdout failed: ") +
 			std::strerror(savedErrno));
@@ -181,42 +206,56 @@ void CgiProcess::configureParent(
 		closeInput();
 }
 
-void CgiProcess::start(const std::string &interpreter,
-					   const std::string &scriptPath,
-					   const std::vector<std::string> &environment,
-					   const std::string &requestBody)
+void CgiProcess::start(
+	const std::string &interpreter,
+	const std::string &scriptPath,
+	const std::vector<std::string> &environment,
+	const std::string &requestBody)
 {
 	if (interpreter.empty() || scriptPath.empty())
-        throw std::runtime_error("CGI interpreter or script path is empty");
+		throw std::runtime_error("CGI interpreter or script path is empty");
 
-    if (_pid != -1 || _stdinFd != -1 || _stdoutFd != -1)
-        throw std::runtime_error("CGI process has already been started");
+	if (_pid != -1 || _stdinFd != -1 || _stdoutFd != -1)
+		throw std::runtime_error("CGI process has already been started");
 
-    std::vector<char *> envp;
-    buildEnvironment(environment, envp);
+	std::vector<char *> envp;
+	buildEnvironment(environment, envp);
 
-    int inputPipe[2];
-    int outputPipe[2];
-    createPipes(inputPipe, outputPipe);
+	int inputPipe[2];
+	int outputPipe[2];
+	createPipes(inputPipe, outputPipe);
 
-    pid_t childPid = fork();
+	pid_t childPid = fork();
 
-    if (childPid == -1)
-    {
-        int savedErrno = errno;
-        closePipe(inputPipe);
-        closePipe(outputPipe);
-        throw std::runtime_error(
-            std::string("CGI fork failed: ") + std::strerror(savedErrno));
-    }
-    if (childPid == 0)
-        executeChild(inputPipe, outputPipe, interpreter, scriptPath, &envp[0]);
-    _pid = childPid;
-    configureParent(inputPipe, outputPipe, requestBody);
-    closePipe(inputPipe);
-    closePipe(outputPipe);
+	if (childPid == -1)
+	{
+		int savedErrno = errno;
+		closePipe(inputPipe);
+		closePipe(outputPipe);
+		throw std::runtime_error(
+			std::string("CGI fork failed: ") + std::strerror(savedErrno));
+	}
+
+	if (childPid == 0)
+		executeChild(inputPipe, outputPipe, interpreter, scriptPath, &envp[0]);
+
+	_pid = childPid;
+
+	try
+	{
+		configureParent(inputPipe, outputPipe, requestBody);
+	}
+	catch (...)
+	{
+		closePipe(inputPipe);
+		closePipe(outputPipe);
+		terminate();
+		throw;
+	}
+
+	closePipe(inputPipe);
+	closePipe(outputPipe);
 }
-
 
 CgiProcess::IOResult CgiProcess::writeInput()
 {
@@ -232,8 +271,7 @@ CgiProcess::IOResult CgiProcess::writeInput()
 	ssize_t count = write(
 		_stdinFd,
 		_inputBuffer.data() + _inputOffset,
-		_inputBuffer.size() - _inputOffset
-	);
+		_inputBuffer.size() - _inputOffset);
 
 	if (count > 0)
 	{
@@ -244,9 +282,25 @@ CgiProcess::IOResult CgiProcess::writeInput()
 			_inputBuffer.clear();
 			_inputOffset = 0;
 			closeInput();
+			return IO_CLOSED;
 		}
+
 		return IO_SUCCESS;
 	}
+
+	if (count == -1)
+	{
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+			return IO_WOULD_BLOCK;
+
+		if (errno == EPIPE)
+		{
+			closeInput();
+			return IO_ERROR;
+		}
+	}
+
+	closeInput();
 	return IO_ERROR;
 }
 
@@ -256,6 +310,7 @@ CgiProcess::IOResult CgiProcess::readOutput()
 		return IO_CLOSED;
 
 	char buffer[4096];
+
 	ssize_t count = read(_stdoutFd, buffer, sizeof(buffer));
 
 	if (count > 0)
@@ -265,16 +320,25 @@ CgiProcess::IOResult CgiProcess::readOutput()
 		if (_maxOutputSize != 0 &&
 			(_outputBuffer.size() > _maxOutputSize ||
 			 amount > _maxOutputSize - _outputBuffer.size()))
+		{
+			closeOutput();
 			return IO_LIMIT_EXCEEDED;
+		}
 
 		_outputBuffer.append(buffer, amount);
 		return IO_SUCCESS;
 	}
+
 	if (count == 0)
 	{
 		closeOutput();
 		return IO_CLOSED;
 	}
+
+	if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+		return IO_WOULD_BLOCK;
+
+	closeOutput();
 	return IO_ERROR;
 }
 
@@ -293,6 +357,14 @@ bool CgiProcess::checkChildStatus()
 	{
 		if (errno == EINTR)
 			return false;
+
+		if (errno == ECHILD)
+		{
+			_childExited = true;
+			_pid = -1;
+			return true;
+		}
+
 		throw std::runtime_error(
 			std::string("CGI waitpid failed: ") + std::strerror(errno));
 	}
@@ -305,8 +377,37 @@ bool CgiProcess::checkChildStatus()
 
 void CgiProcess::terminate()
 {
-	if (_pid > 0 && !_childExited)
-		kill(_pid, SIGKILL);
+	closeInput();
+	closeOutput();
+
+	if (_pid <= 0 || _childExited)
+		return;
+
+	pid_t pid = _pid;
+
+	if (kill(pid, SIGKILL) == -1 && errno != ESRCH)
+		return;
+
+	int status = 0;
+	pid_t result;
+
+	do
+	{
+		result = waitpid(pid, &status, 0);
+	}
+	while (result == -1 && errno == EINTR);
+
+	if (result == pid)
+	{
+		_exitStatus = status;
+		_childExited = true;
+		_pid = -1;
+	}
+	else if (result == -1 && errno == ECHILD)
+	{
+		_childExited = true;
+		_pid = -1;
+	}
 }
 
 const std::string &CgiProcess::getOutput() const
@@ -347,4 +448,23 @@ std::time_t CgiProcess::getStartTime() const
 int CgiProcess::getExitStatus() const
 {
 	return _exitStatus;
+}
+
+bool CgiProcess::hasSucceeded() const
+{
+	return _childExited
+		&& _stdinClosed
+		&& _stdoutClosed
+		&& _exitStatus != -1
+		&& WIFEXITED(_exitStatus)
+		&& WEXITSTATUS(_exitStatus) == 0;
+}
+
+bool CgiProcess::hasTimedOut(
+	std::time_t now,
+	std::time_t timeout) const
+{
+	return _startTime > 0
+		&& !_childExited
+		&& now - _startTime >= timeout;
 }

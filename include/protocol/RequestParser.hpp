@@ -7,48 +7,52 @@
 
 class RequestParser
 {
-    public:
-        
-        enum ParseStatus
-        {
-            PARSE_INCOMPLETE,
+	public:
+		
+		enum ParseStatus
+		{
+			PARSE_INCOMPLETE,
 			PARSE_COMPLETE,
 			PARSE_ERROR
-        };
-    
-    private:
-        std::string _buffer;
-        size_t      _maxBodySize;
-        bool        _complete;
-        bool        _error;
-        Request     _request;
-        std::string _errorMessage;
+		};
+	
+	private:
+		std::string _buffer;
+		size_t      _maxBodySize;
+		bool        _complete;
+		bool        _error;
+		Request     _request;
+		std::string _errorMessage;
 
-        bool parseHeaders();
-        bool parseRequestLine(const std::string &line);
-        bool parseHeaderLine(const std::string &line);
-        bool parseBody();
+		bool parseHeaders();
+		bool parseRequestLine(const std::string &line);
+		bool parseHeaderLine(const std::string &line);
+		bool parseBody();
 
-        static std::string trim(const std::string &value);
-        static std::string toLower(const std::string &value);
-        static bool isNummber(const std::string &value);
+		static std::string trim(const std::string &value);
+		static std::string toLower(const std::string &value);
+		static bool isNummber(const std::string &value);
 
-    public:
-        
-        RequestParser();
-        RequestParser(size_t maxBodySize);
-        RequestParser(const RequestParser &other);
-        RequestParser &operator=(const RequestParser &other);
-        ~RequestParser();
+		size_t	transformHexDigit(const std::string &hex);
+		bool	checkHeaderConflicts(std::string &lengthText, std::string &transfer);
 
-        void append(const std::string &data);
+
+	public:
+		
+		RequestParser();
+		RequestParser(size_t maxBodySize);
+		RequestParser(const RequestParser &other);
+		RequestParser &operator=(const RequestParser &other);
+		~RequestParser();
+
+		void	append(const std::string &data);
 
 		ParseStatus getState() const;
-		bool isComplete() const;
-		bool hasError() const;
+		bool	isComplete() const;
+		bool	hasError() const;
 
-		const Request &getRequest() const;
-		const std::string &getErrorMessage() const;
+		const	Request &getRequest() const;
+		const	std::string &getErrorMessage() const;
 
-		void reset();
+		void	reset();
 };

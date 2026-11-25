@@ -180,12 +180,35 @@ bool RequestParser::parseHeaders()
 
 bool RequestParser::parseBody()
 {
-    std::string transfer =toLower(trim(_request.getHeader("transfer-encoding")));
-    std::string lengthText =trim(_request.getHeader("content-length"));
+    bool hasTransferEncoding = _request.hasHeader("transfer-encoding");
+
+    bool hasContentLength =_request.hasHeader("content-length");
+
+    std::string transfer = toLower(trim(_request.getHeader("transfer-encoding")));
+
+    std::string lengthText = trim(_request.getHeader("content-length"));
+
+    if (hasTransferEncoding && hasContentLength)
+    {
+        _errorMessage = "Content-Length and Transfer-Encoding cannot be used together";
+        return false;
+    }
+
+    if (hasContentLength && lengthText.empty())
+    {
+        _errorMessage = "Empty Content-Length";
+        return false;
+    }
+
+    if (hasTransferEncoding && transfer.empty())
+    {
+        _errorMessage = "Empty Transfer-Encoding";
+        return false;
+    }
 
     if (!transfer.empty() && transfer != "chunked")
     {
-        _errorMessage = "Usupported Transfer_Encoding";
+        _errorMessage = "Usupported Transfer-Encoding";
         return false;
     }
 

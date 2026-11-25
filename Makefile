@@ -25,7 +25,8 @@ COMMON_SRCS = $(SRC_DIR)/protocol/RequestParser.cpp \
 
 CGI_SRCS = \
 	$(SRC_DIR)/CGI/CgiHandler.cpp \
-	$(SRC_DIR)/CGI/CgiProcess.cpp
+	$(SRC_DIR)/CGI/CgiProcess.cpp \
+	$(SRC_DIR)/CGI/CgiManager.cpp
 
 CONFIG_SRCS = \
 	$(SRC_DIR)/config/ConfigParser.cpp \

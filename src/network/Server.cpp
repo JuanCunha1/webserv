@@ -212,7 +212,7 @@ bool Server::handlePollEvent(size_t index)
 		return false;
 	}
 
-	if (findCgiByFd(fd) != NULL)
+	if (_cgiManager.findCgiByFd(fd) != NULL)
 	{
 		handleCgiEvent(index);
 		return findPollFd(fd) == -1;
@@ -323,12 +323,6 @@ void Server::handleRequest(Client &client)
 		return;
 
 	const Request &request = client.getRequest();
-
-	if (isCgiRequest(request))
-	{
-		startCgi(client, request);
-		return;
-	}
 
 	std::cout << "Received request: "
 			  << request.getMethod() << " "
@@ -597,7 +591,6 @@ bool Server::hasListeningSocket(const std::string &host, int port) const
 	}
 	return false;
 }
-
 void Server::checkTimeouts()
 {
 	std::time_t now = std::time(NULL);
@@ -606,13 +599,42 @@ void Server::checkTimeouts()
 	while (i < _clients.size())
 	{
 		Client *client = _clients[i];
-		
-
-		if (findCgiByClient(client->getFd()) != NULL)
+		CgiTask *cgiTask = _cgiManager.findCgiByClient(client->getFd());
+		if (cgiTask != NULL && cgiTask->getProcess() != NULL)
 		{
+			CgiProcess *process = cgiTask->getProcess();
+			try
+			{
+				process->checkChildStatus();
+			}
+			catch (const std::exception &e)
+			{
+				std::cerr << "CGI wait error: " << e.what() << std::endl;
+				finishCgi(cgiTask, false, 502);
+				++i;
+				continue;
+			}
+
+			if (process->isFinished())
+			{
+				finishCgi(cgiTask, process->hasSucceeded(), 502);
+				++i;
+				continue;
+			}
+
+			if (process->hasTimedOut(now, CGI_TIMEOUT))
+			{
+				/* Remove pipe entries while their descriptors are still known. */
+				removeCgiFromPoll(cgiTask);
+				process->terminate();
+				finishCgi(cgiTask, false, 504);
+				++i;
+				continue;
+			}
 			++i;
 			continue;
 		}
+
 		if (!client->isTimedOut(now, CLIENT_TIMEOUT))
 		{
 			++i;
@@ -649,62 +671,143 @@ void Server::checkTimeouts()
 	}
 }
 
-void Server::addCgiToPoll(CgiTask *task)
-{
-	CgiProcess *cgi = task->process;
 
+
+bool Server::addCgiToPoll(CgiTask *task)
+{
+	if (task == NULL || task->getProcess() == NULL)
+		return false;
+
+	CgiProcess *process = task->getProcess();
 	struct pollfd pfd;
 
-	if (cgi->getStdinFd() != -1)
+	if (process->getStdinFd() != -1)
 	{
-		pfd.fd = cgi->getStdinFd();
+		pfd.fd = process->getStdinFd();
 		pfd.events = POLLOUT;
 		pfd.revents = 0;
 		_pollFds.push_back(pfd);
 	}
 
-	if (cgi->getStdoutFd() != -1)
+	if (process->getStdoutFd() != -1)
 	{
-		pfd.fd = cgi->getStdoutFd();
+		pfd.fd = process->getStdoutFd();
 		pfd.events = POLLIN;
 		pfd.revents = 0;
-		_pollFds.push_back(pfd);
+		try
+		{
+			_pollFds.push_back(pfd);
+		}
+		catch (...)
+		{
+			removeCgiFromPoll(task);
+			throw;
+		}
+	}
+
+	return true;
+}
+
+void Server::removeCgiFromPoll(CgiTask *task)
+{
+	if (task == NULL || task->getProcess() == NULL)
+		return;
+
+	CgiProcess *process = task->getProcess();
+
+	for (size_t i = 0; i < _pollFds.size(); ++i)
+	{
+		if (_pollFds[i].fd == process->getStdinFd() ||
+			_pollFds[i].fd == process->getStdoutFd())
+		{
+			_pollFds.erase(_pollFds.begin() + i);
+			--i;
+		}
 	}
 }
 
-void Server::handleCgiWrite(CgiTask *task)
+static std::string makeCgiHttpResponse(const std::string &cgiOutput)
 {
-	CgiProcess *cgi = task->process;
-
-	CgiProcess::IOResult result = cgi->writeInput();
-
-	if (result == CgiProcess::IO_ERROR)
+	std::string::size_type separator = cgiOutput.find("\r\n\r\n");
+	size_t separatorSize = 4;
+	if (separator == std::string::npos)
 	{
-		cgi->terminate();
-		return;
+		separator = cgiOutput.find("\n\n");
+		separatorSize = 2;
 	}
 
-	if (cgi->getStdinFd() == -1)
+	if (separator == std::string::npos)
 	{
-		// Remover o descritor antigo do poll.
-		// O CGI já recebeu todo o request body.
+		std::ostringstream response;
+		response << "HTTP/1.1 200 OK\r\n"
+				 << "Content-Type: text/plain\r\n"
+				 << "Content-Length: " << cgiOutput.size() << "\r\n"
+				 << "Connection: close\r\n\r\n"
+				 << cgiOutput;
+		return response.str();
 	}
+
+	std::string headers = cgiOutput.substr(0, separator);
+	std::string body = cgiOutput.substr(separator + separatorSize);
+	std::ostringstream response;
+	response << "HTTP/1.1 200 OK\r\n";
+
+	std::string::size_type start = 0;
+	while (start < headers.size())
+	{
+		std::string::size_type end = headers.find('\n', start);
+		if (end == std::string::npos)
+			end = headers.size();
+		std::string line = headers.substr(start, end - start);
+		if (!line.empty() && line[line.size() - 1] == '\r')
+			line.erase(line.size() - 1);
+		if (line.compare(0, 7, "Status:") != 0 && !line.empty())
+			response << line << "\r\n";
+		start = end + 1;
+	}
+
+	response << "Content-Length: " << body.size() << "\r\n"
+			 << "Connection: close\r\n\r\n"
+			 << body;
+	return response.str();
 }
 
-void Server::handleCgiRead(CgiTask *task)
+void Server::finishCgi(CgiTask *task, bool success, int statusCode)
 {
-	CgiProcess *cgi = task->process;
-
-	CgiProcess::IOResult result = cgi->readOutput();
-
-	if (result == CgiProcess::IO_ERROR ||
-		result == CgiProcess::IO_LIMIT_EXCEEDED)
-	{
-		cgi->terminate();
+	if (task == NULL)
 		return;
+
+	int clientFd = task->getClientFd();
+	CgiProcess *process = task->getProcess();
+	std::string response;
+
+	if (success && process != NULL)
+		response = makeCgiHttpResponse(process->getOutput());
+	else
+	{
+		std::ostringstream errorResponse;
+		const char *reason = statusCode == 504 ? "Gateway Timeout" : "Bad Gateway";
+		errorResponse << "HTTP/1.1 " << statusCode << " " << reason << "\r\n"
+					  << "Content-Length: 0\r\n"
+					  << "Connection: close\r\n\r\n";
+		response = errorResponse.str();
 	}
 
-	// Se o stdout foi fechado, remover o seu fd do poll.
+	removeCgiFromPoll(task);
+	_cgiManager.remove(task);
+
+	Client *client = findClient(clientFd);
+	if (client == NULL)
+		return;
+
+	client->setResponse(response);
+	client->setShouldClose(true);
+	int clientPollIndex = findPollFd(clientFd);
+	if (clientPollIndex != -1)
+	{
+		_pollFds[clientPollIndex].events &= ~POLLIN;
+		_pollFds[clientPollIndex].events |= POLLOUT;
+	}
 }
 
 void Server::handleCgiEvent(size_t index)
@@ -715,123 +818,237 @@ void Server::handleCgiEvent(size_t index)
 	int fd = _pollFds[index].fd;
 	short events = _pollFds[index].revents;
 
-	CgiTask *task = findCgiByFd(fd);
+	CgiTask *task = _cgiManager.findCgiByFd(fd);
 
 	if (task == NULL)
 		return;
 
+	CgiProcess *process = task->getProcess();
+	if (process == NULL)
+		return;
+
 	if (events & POLLNVAL)
 	{
-		task->process->terminate();
+		process->terminate();
+		finishCgi(task, false, 502);
 		return;
 	}
 
-	if (fd == task->process->getStdinFd() &&
-		(events & POLLOUT))
+	if (fd == process->getStdinFd() && (events & POLLOUT))
 	{
-		handleCgiWrite(task);
+		CgiProcess::IOResult result = process->writeInput();
+
+		if (result == CgiProcess::IO_ERROR)
+		{
+			process->terminate();
+			finishCgi(task, false, 502);
+			return;
+		}
+
+		if (process->getStdinFd() == -1)
+			removeCgiFromPoll(task);
 	}
 
-	if (fd == task->process->getStdoutFd() &&
-		(events & (POLLIN | POLLHUP)))
+	if (fd == process->getStdoutFd() && (events & (POLLIN | POLLHUP)))
 	{
-		handleCgiRead(task);
-	}
+		CgiProcess::IOResult result = process->readOutput();
 
-	if (events & POLLERR)
-		task->process->terminate();
+		if (result == CgiProcess::IO_ERROR ||
+			result == CgiProcess::IO_LIMIT_EXCEEDED)
+		{
+			process->terminate();
+			finishCgi(task, false, 502);
+			return;
+		}
+
+		if (process->getStdoutFd() == -1)
+			removeCgiFromPoll(task);
+	}
 }
 
-bool Server::isCgiRequest(const Request &request) const
-{
-	const std::string &target = request.getTarget();
-	size_t dotPos = target.rfind('.');
-	if (dotPos == std::string::npos)
-		return false;
+// void Server::addCgiToPoll(CgiTask *task)
+// {
+// 	CgiProcess *cgi = task->process;
 
-	std::string extension = target.substr(dotPos + 1);
-	return extension == "cgi" || extension == "pl" || extension == "py";
-}
+// 	struct pollfd pfd;
 
-bool Server::startCgi(Client &client, const Request &request)
-{
-	const std::string &target = request.getTarget();
-	size_t dotPos = target.rfind('.');
-	if (dotPos == std::string::npos)
-		return false;
+// 	if (cgi->getStdinFd() != -1)
+// 	{
+// 		pfd.fd = cgi->getStdinFd();
+// 		pfd.events = POLLOUT;
+// 		pfd.revents = 0;
+// 		_pollFds.push_back(pfd);
+// 	}
 
-	std::string extension = target.substr(dotPos + 1);
-	std::string interpreter;
-	if (extension == "cgi")
-		interpreter = "/usr/bin/perl";
-	else if (extension == "pl")
-		interpreter = "/usr/bin/perl";
-	else if (extension == "py")
-		interpreter = "/usr/bin/python3";
-	else
-		return false;
+// 	if (cgi->getStdoutFd() != -1)
+// 	{
+// 		pfd.fd = cgi->getStdoutFd();
+// 		pfd.events = POLLIN;
+// 		pfd.revents = 0;
+// 		_pollFds.push_back(pfd);
+// 	}
+// }
 
-	CgiProcess *cgi = new CgiProcess(1024 * 1024);
+// void Server::handleCgiWrite(CgiTask *task)
+// {
+// 	CgiProcess *cgi = task->process;
 
-	try
-	{
-//		cgi->start(
-//			interpreter,
-//			target,
-//			nullptr,
-//			request.getBody()
-//		);
-	}
-	catch (...)
-	{
-		delete cgi;
-		throw;
-	}
+// 	CgiProcess::IOResult result = cgi->writeInput();
 
-	CgiTask *task = new CgiTask();
-	task->clientFd = client.getFd();
-	task->process = cgi;
+// 	if (result == CgiProcess::IO_ERROR)
+// 	{
+// 		cgi->terminate();
+// 		return;
+// 	}
 
-	try
-	{
-		addCgiToPoll(task);
-	}
-	catch (...)
-	{
-		delete task;
-		throw;
-	}
+// 	if (cgi->getStdinFd() == -1)
+// 	{
+// 		// Remover o descritor antigo do poll.
+// 		// O CGI já recebeu todo o request body.
+// 	}
+// }
 
-	try
-	{
-		_cgiTasks.push_back(task);
-	}
-	catch (...)
-	{
-		delete task;
-		throw;
-	}
+// void Server::handleCgiRead(CgiTask *task)
+// {
+// 	CgiProcess *cgi = task->process;
 
-	return true;
-}
+// 	CgiProcess::IOResult result = cgi->readOutput();
 
-Server::CgiTask *Server::findCgiByFd(int fd)
-{
-	for (std::vector<CgiTask *>::iterator it = _cgiTasks.begin(); it != _cgiTasks.end(); ++it)
-	{
-		if ((*it)->process->getStdinFd() == fd || (*it)->process->getStdoutFd() == fd)
-			return *it;
-	}
-	return NULL;
-}
+// 	if (result == CgiProcess::IO_ERROR ||
+// 		result == CgiProcess::IO_LIMIT_EXCEEDED)
+// 	{
+// 		cgi->terminate();
+// 		return;
+// 	}
 
-// Finds and returns the CgiTask associated with the given client file descriptor, or NULL if not found.
-Server::CgiTask *Server::findCgiByClient(int clientFd)
-{
-	for (std::vector<CgiTask *>::iterator it = _cgiTasks.begin(); it != _cgiTasks.end(); ++it)
-	{
-		if ((*it)->clientFd == clientFd)
-			return *it;
-	}
-	return NULL;
-}
+// 	// Se o stdout foi fechado, remover o seu fd do poll.
+// }
+
+// void Server::handleCgiEvent(size_t index)
+// {
+// 	if (index >= _pollFds.size())
+// 		return;
+
+// 	int fd = _pollFds[index].fd;
+// 	short events = _pollFds[index].revents;
+
+// 	CgiTask *task = findCgiByFd(fd);
+
+// 	if (task == NULL)
+// 		return;
+
+// 	if (events & POLLNVAL)
+// 	{
+// 		task->process->terminate();
+// 		return;
+// 	}
+
+// 	if (fd == task->process->getStdinFd() &&
+// 		(events & POLLOUT))
+// 	{
+// 		handleCgiWrite(task);
+// 	}
+
+// 	if (fd == task->process->getStdoutFd() &&
+// 		(events & (POLLIN | POLLHUP)))
+// 	{
+// 		handleCgiRead(task);
+// 	}
+
+// 	if (events & POLLERR)
+// 		task->process->terminate();
+// }
+
+// bool Server::isCgiRequest(const Request &request) const
+// {
+// 	const std::string &target = request.getTarget();
+// 	size_t dotPos = target.rfind('.');
+// 	if (dotPos == std::string::npos)
+// 		return false;
+
+// 	std::string extension = target.substr(dotPos + 1);
+// 	return extension == "cgi" || extension == "pl" || extension == "py";
+// }
+
+// bool Server::startCgi(Client &client, const Request &request)
+// {
+// 	const std::string &target = request.getTarget();
+// 	size_t dotPos = target.rfind('.');
+// 	if (dotPos == std::string::npos)
+// 		return false;
+
+// 	std::string extension = target.substr(dotPos + 1);
+// 	std::string interpreter;
+// 	if (extension == "cgi")
+// 		interpreter = "/usr/bin/perl";
+// 	else if (extension == "pl")
+// 		interpreter = "/usr/bin/perl";
+// 	else if (extension == "py")
+// 		interpreter = "/usr/bin/python3";
+// 	else
+// 		return false;
+
+// 	CgiProcess *cgi = new CgiProcess(1024 * 1024);
+
+// 	try
+// 	{
+// //		cgi->start(
+// //			interpreter,
+// //			target,
+// //			nullptr,
+// //			request.getBody()
+// //		);
+// 	}
+// 	catch (...)
+// 	{
+// 		delete cgi;
+// 		throw;
+// 	}
+
+// 	CgiTask *task = new CgiTask();
+// 	task->clientFd = client.getFd();
+// 	task->process = cgi;
+
+// 	try
+// 	{
+// 		addCgiToPoll(task);
+// 	}
+// 	catch (...)
+// 	{
+// 		delete task;
+// 		throw;
+// 	}
+
+// 	try
+// 	{
+// 		_cgiTasks.push_back(task);
+// 	}
+// 	catch (...)
+// 	{
+// 		delete task;
+// 		throw;
+// 	}
+
+// 	return true;
+// }
+
+// Server::CgiTask *Server::findCgiByFd(int fd)
+// {
+// 	for (std::vector<CgiTask *>::iterator it = _cgiTasks.begin(); it != _cgiTasks.end(); ++it)
+// 	{
+// 		if ((*it)->process->getStdinFd() == fd || (*it)->process->getStdoutFd() == fd)
+// 			return *it;
+// 	}
+// 	return NULL;
+// }
+
+// // Finds and returns the CgiTask associated with the given client file descriptor, or NULL if not found.
+// Server::CgiTask *Server::findCgiByClient(int clientFd)
+// {
+// 	for (std::vector<CgiTask *>::iterator it = _cgiTasks.begin(); it != _cgiTasks.end(); ++it)
+// 	{
+// 		if ((*it)->clientFd == clientFd)
+// 			return *it;
+// 	}
+// 	return NULL;
+// }

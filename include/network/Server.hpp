@@ -14,19 +14,13 @@
 #include "config/ServerConfig.hpp"
 #include "config/LocationConfig.hpp"
 #include "protocol/Request.hpp"
-#include "CGI/CgiProcess.hpp"
+#include "CGI/CgiManager.hpp"
 
 static const int CLIENT_TIMEOUT = 5;
+static const int CGI_TIMEOUT = 30;
 
 class Server
 {
-	public:
-		struct CgiTask
-		{
-			int clientFd;
-			CgiProcess *process;
-		};
-
 	private:
 		std::vector<Socket *>		_sockets;
 		std::vector<Client *>		_clients;
@@ -35,7 +29,7 @@ class Server
 		RequestParser				_requestParser;
 		
 
-		std::vector<CgiTask *> _cgiTasks;
+		CgiManager _cgiManager;
 
 		Server();
 		Server(const Server &other);
@@ -66,20 +60,10 @@ class Server
 		void	handleRequest(Client &client);
 
 
-		CgiTask *findCgiByFd(int fd);
-		CgiTask *findCgiByClient(int clientFd);
-
-		void addCgiToPoll(CgiTask *task);
-		void removeCgiFromPoll(CgiTask *task);
-
-		void handleCgiEvent(size_t index);
-		void handleCgiRead(CgiTask *task);
-		void handleCgiWrite(CgiTask *task);
-
-		void finishCgi(CgiTask *task);
-		void checkCgiTimeouts();
-		bool isCgiRequest(const Request &request) const;
-		bool startCgi(Client &client, const Request &request);
+		bool	addCgiToPoll(CgiTask *task);
+		void	removeCgiFromPoll(CgiTask *task);
+		void	handleCgiEvent(size_t index);
+		void	finishCgi(CgiTask *task, bool success, int statusCode);
 
 	public:
 		Server(std::vector<ServerConfig> serverConfigs);
